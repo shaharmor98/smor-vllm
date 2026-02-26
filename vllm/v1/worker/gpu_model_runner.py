@@ -1202,7 +1202,10 @@ class GPUModelRunner(
         )
         for i, num_tokens in enumerate(num_accepted_tokens):
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
-        if self.cache_config.mamba_cache_mode == "align":
+        has_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+        if self.cache_config.mamba_cache_mode == "align" or (
+            self.cache_config.mamba_cache_mode == "all" and has_spec_decode
+        ):
             mamba_utils.postprocess_mamba(
                 scheduler_output,
                 self.kv_cache_config,
@@ -3495,7 +3498,11 @@ class GPUModelRunner(
             )
             pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
-            if self.cache_config.mamba_cache_mode == "align":
+            use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+
+            if self.cache_config.mamba_cache_mode == "align" or (
+                self.cache_config.mamba_cache_mode == "all" and use_spec_decode
+            ):
                 mamba_utils.preprocess_mamba(
                     scheduler_output,
                     self.kv_cache_config,
@@ -3506,8 +3513,6 @@ class GPUModelRunner(
                     self.compilation_config.static_forward_context,
                     self.model.get_mamba_state_copy_func(),
                 )
-
-            use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
 
             slot_mappings_by_group, slot_mappings = self._get_slot_mappings(

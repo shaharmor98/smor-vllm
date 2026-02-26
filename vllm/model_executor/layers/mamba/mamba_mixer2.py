@@ -814,12 +814,41 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # Process decode requests
         if has_decode:
             if is_mamba_cache_all:
-                state_indices_tensor_d_input = state_indices_tensor_d.gather(
-                    1, block_idx_last_computed_token_d.unsqueeze(1)
-                ).squeeze(1)
-                state_indices_tensor_d_output = state_indices_tensor_d.gather(
-                    1, block_idx_last_scheduled_token_d.unsqueeze(1)
-                ).squeeze(1)
+                if num_accepted_tokens is not None:
+                    # "all" mode + MTP: construct per-token block indices
+                    # for SSM kernel. Column 0 = running block (at
+                    # block_idx_last_scheduled_token), columns 1..K =
+                    # speculative extension blocks that follow it.
+                    num_spec = self.num_spec
+                    offsets = torch.arange(
+                        1 + num_spec,
+                        device=state_indices_tensor_d.device,
+                        dtype=torch.int64,
+                    )
+                    gather_cols = (
+                        block_idx_last_scheduled_token_d
+                        .unsqueeze(1).to(torch.int64)
+                        + offsets
+                    ).clamp(max=state_indices_tensor_d.size(1) - 1)
+                    state_indices_tensor_d_input = (
+                        state_indices_tensor_d.gather(1, gather_cols)
+                    )
+                    state_indices_tensor_d_output = (
+                        state_indices_tensor_d_input
+                    )
+                else:
+                    state_indices_tensor_d_input = (
+                        state_indices_tensor_d.gather(
+                            1,
+                            block_idx_last_computed_token_d.unsqueeze(1),
+                        ).squeeze(1)
+                    )
+                    state_indices_tensor_d_output = (
+                        state_indices_tensor_d.gather(
+                            1,
+                            block_idx_last_scheduled_token_d.unsqueeze(1),
+                        ).squeeze(1)
+                    )
                 # for decode:
                 #   block_idx_first_scheduled_token_d ==
                 #       block_idx_last_scheduled_token_d
@@ -832,6 +861,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 state_indices_tensor_d_output = state_indices_tensor_d
 
             # 2. Convolution sequence transformation
+            # For "all" mode + MTP: preprocess_mamba copies the accepted
+            # state to the running block at block_idx_last_scheduled_token,
+            # so read from there instead of block_idx_last_computed_token.
+            conv_initial_state_idx = block_idx_last_computed_token_d
+            if is_mamba_cache_all and num_accepted_tokens is not None:
+                conv_initial_state_idx = block_idx_last_scheduled_token_d
             hidden_states_B_C_d = causal_conv1d_update(
                 hidden_states_B_C_d,
                 conv_state,
@@ -840,7 +875,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 self.activation,
                 conv_state_indices=state_indices_tensor_d,
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
-                initial_state_idx=block_idx_last_computed_token_d,
+                initial_state_idx=conv_initial_state_idx,
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=query_start_loc_d,
                 max_query_len=state_indices_tensor_d.size(-1),
