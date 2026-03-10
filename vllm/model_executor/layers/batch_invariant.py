@@ -1067,3 +1067,10 @@ def init_batch_invariance(
         torch.backends.cuda.matmul.fp32_precision = "ieee"
         torch.backends.cudnn.conv.fp32_precision = "ieee"
         torch.backends.cudnn.rnn.fp32_precision = "ieee"
+
+        # Force deterministic algorithms globally — critical for cuBLAS inside
+        # torch.compile'd subgraphs where batch_invariant dispatch overrides
+        # are bypassed by Inductor's direct extern_kernels.mm calls.
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
