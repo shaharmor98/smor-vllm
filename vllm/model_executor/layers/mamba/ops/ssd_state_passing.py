@@ -11,17 +11,6 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE": 64}),
-        triton.Config({"BLOCK_SIZE": 128}),
-        triton.Config({"BLOCK_SIZE": 256}),
-        triton.Config({"BLOCK_SIZE": 512}),
-        triton.Config({"BLOCK_SIZE": 1024}),
-        triton.Config({"BLOCK_SIZE": 2048}),
-    ],
-    key=["dim"],
-)
 @triton.jit
 def _state_passing_fwd_kernel(
     # Pointers to matrices
@@ -126,7 +115,8 @@ def _state_passing_fwd(
         else (0, 0, 0)
     )
 
-    grid = lambda META: (triton.cdiv(dim, META["BLOCK_SIZE"]), nheads)
+    BLOCK_SIZE = 64
+    grid = (triton.cdiv(dim, BLOCK_SIZE), nheads)
     with torch.cuda.device(states.device.index):
         _state_passing_fwd_kernel[grid](
             states_ptr=states,
@@ -153,5 +143,6 @@ def _state_passing_fwd(
             stride_initstates_dim=initial_states_strides[2],
             stride_seq_idx_chunk=seq_idx.stride(0),
             HAS_INITSTATES=initial_states is not None,
+            BLOCK_SIZE=BLOCK_SIZE,
         )
     return out
