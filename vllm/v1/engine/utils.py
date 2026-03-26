@@ -7,7 +7,7 @@ import socket as stdlib_socket
 import threading
 import weakref
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
@@ -71,16 +71,25 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
-    # Pre-bound TCP sockets that hold ports to prevent TOCTOU race
-    # between allocation and ZMQ bind. See parallel.py:483 for precedent.
-    _held_sockets: list[stdlib_socket.socket] = field(
-        default_factory=list, repr=False, compare=False)
 
     def release_held_ports(self) -> None:
-        """Release pre-bound TCP sockets right before ZMQ binds."""
-        for s in self._held_sockets:
+        """Release pre-bound TCP sockets right before ZMQ binds.
+
+        Sockets are stored as a plain attribute (not a dataclass field)
+        to avoid breaking msgspec serialization in the handshake path.
+        """
+        for s in getattr(self, '_held_sockets', []):
             s.close()
-        self._held_sockets.clear()
+        self._held_sockets = []
+
+    def __getstate__(self):
+        # Exclude held sockets from pickling (e.g. Ray actor serialization).
+        state = self.__dict__.copy()
+        state.pop('_held_sockets', None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
 
 
 @dataclass
@@ -879,11 +888,14 @@ def get_engine_zmq_addresses(
         ports.append(s.getsockname()[1])
         held.append(s)
 
-    return EngineZmqAddresses(
+    addrs = EngineZmqAddresses(
         inputs=[get_tcp_uri(host, p) for p in ports[:num_api_servers]],
         outputs=[get_tcp_uri(host, p) for p in ports[num_api_servers:]],
-        _held_sockets=held,
     )
+    # Store as plain attribute (not a dataclass field) so msgspec
+    # serialization in the handshake path doesn't try to encode sockets.
+    addrs._held_sockets = held
+    return addrs
 
 
 @contextlib.contextmanager
