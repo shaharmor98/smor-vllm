@@ -3,10 +3,11 @@
 
 import contextlib
 import os
+import socket as stdlib_socket
 import threading
 import weakref
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
@@ -22,7 +23,11 @@ from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
-from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
+from vllm.utils.network_utils import (
+    get_open_zmq_ipc_path,
+    get_tcp_uri,
+    zmq_socket_ctx,
+)
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
@@ -66,6 +71,16 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
+    # Pre-bound TCP sockets that hold ports to prevent TOCTOU race
+    # between allocation and ZMQ bind. See parallel.py:483 for precedent.
+    _held_sockets: list[stdlib_socket.socket] = field(
+        default_factory=list, repr=False, compare=False)
+
+    def release_held_ports(self) -> None:
+        """Release pre-bound TCP sockets right before ZMQ binds."""
+        for s in self._held_sockets:
+            s.close()
+        self._held_sockets.clear()
 
 
 @dataclass
@@ -843,15 +858,31 @@ def get_engine_zmq_addresses(
     if parallel_config.enable_elastic_ep:
         client_local_only = False
 
+    if client_local_only:
+        return EngineZmqAddresses(
+            inputs=[
+                get_open_zmq_ipc_path() for _ in range(num_api_servers)
+            ],
+            outputs=[
+                get_open_zmq_ipc_path() for _ in range(num_api_servers)
+            ],
+        )
+
+    # TCP path: batch-allocate ports and hold sockets to prevent
+    # TOCTOU race between allocation and ZMQ bind (see parallel.py:483).
+    count = num_api_servers * 2
+    held: list[stdlib_socket.socket] = []
+    ports: list[int] = []
+    for _ in range(count):
+        s = stdlib_socket.socket(stdlib_socket.AF_INET, stdlib_socket.SOCK_STREAM)
+        s.bind(("", 0))
+        ports.append(s.getsockname()[1])
+        held.append(s)
+
     return EngineZmqAddresses(
-        inputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
-            for _ in range(num_api_servers)
-        ],
-        outputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
-            for _ in range(num_api_servers)
-        ],
+        inputs=[get_tcp_uri(host, p) for p in ports[:num_api_servers]],
+        outputs=[get_tcp_uri(host, p) for p in ports[num_api_servers:]],
+        _held_sockets=held,
     )
 
 
