@@ -516,6 +516,7 @@ class CoreEngineActorManager:
         # bundles collected for a single DP rank from multiple nodes,
         # for "span" pack strategy
         collected_bundles = []
+        first_node_in_pg = ""
         for node_resources in nodes:
             node_ip_keys = [
                 key
@@ -564,6 +565,8 @@ class CoreEngineActorManager:
             for i in range(dp_size_to_allocate):
                 device_bundle = [{device_str: 1.0, "node:" + node_ip: 0.001}]
                 if pack_strategy == "span":
+                    if not collected_bundles:
+                        first_node_in_pg = node_ip
                     collected_bundles += device_bundle * n_device_on_node
                     assert len(collected_bundles) <= world_size, (
                         "collected_bundles should be <= world_size, "
@@ -574,8 +577,12 @@ class CoreEngineActorManager:
                     if len(collected_bundles) < world_size:
                         continue
 
-                    bundles = collected_bundles + [{"CPU": 1.0}]
+                    bundles = collected_bundles + [
+                        {"CPU": 1.0,
+                         f"node:{first_node_in_pg}": 0.001}
+                    ]
                     collected_bundles = []
+                    first_node_in_pg = ""
                 else:
                     bundles = device_bundle * world_size + [{"CPU": 1.0}]
 
