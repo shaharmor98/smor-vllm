@@ -413,6 +413,19 @@ class RayDistributedExecutor(Executor):
         ):
             self.shutdown()
 
+    def determine_available_memory(self) -> list[int]:
+        # Eagerly compile the Ray compiled DAG before memory profiling.
+        # experimental_compile() allocates NCCL channel buffers on worker GPUs
+        # via TVM/DLPack (~19 GiB for TP=8, ~7 GiB for TP=4).
+        # By doing this before profiling, the buffers are captured in the
+        # memory profile's non_torch_increase and correctly subtracted from
+        # the available KV cache budget. Without this, lazy compilation
+        # during first execute_model() OOMs because KV cache already
+        # consumed the memory.
+        if self.forward_dag is None:
+            self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
+        return self.collective_rpc("determine_available_memory")
+
     def execute_model(  # type: ignore[override]
         self,
         scheduler_output: SchedulerOutput,
@@ -463,8 +476,11 @@ class RayDistributedExecutor(Executor):
         grammar_output: "GrammarOutput | None",
         non_block: bool = False,
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
-        # Build the compiled DAG for the first time.
-        if self.forward_dag is None:  # type: ignore
+        # Normally compiled eagerly in determine_available_memory() so that
+        # NCCL buffers are accounted for in the KV cache budget. Fall back
+        # to lazy compilation for attention-free models where
+        # determine_available_memory() is never called.
+        if self.forward_dag is None:
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
         refs = self.forward_dag.execute((scheduler_output, grammar_output))  # type: ignore
