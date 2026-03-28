@@ -414,17 +414,53 @@ class RayDistributedExecutor(Executor):
             self.shutdown()
 
     def determine_available_memory(self) -> list[int]:
-        # Eagerly compile the Ray compiled DAG before memory profiling.
-        # experimental_compile() allocates NCCL channel buffers on worker GPUs
-        # via TVM/DLPack (~19 GiB for TP=8, ~7 GiB for TP=4).
-        # By doing this before profiling, the buffers are captured in the
-        # memory profile's non_torch_increase and correctly subtracted from
-        # the available KV cache budget. Without this, lazy compilation
-        # during first execute_model() OOMs because KV cache already
-        # consumed the memory.
+        # Step 1: Profile memory normally. Custom all-reduce IPC handles
+        # work because the Ray compiled DAG hasn't been compiled yet.
+        available = self.collective_rpc("determine_available_memory")
+
+        # Step 2: Compile the DAG and subtract its NCCL buffer memory
+        # from the available KV cache budget.
         if self.forward_dag is None:
-            self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
-        return self.collective_rpc("determine_available_memory")
+            overheads = self._compile_dag_and_measure_overhead()
+            available = [max(0, a - o) for a, o in zip(available, overheads)]
+
+        return available
+
+    def _compile_dag_and_measure_overhead(self) -> list[int]:
+        """Compile the Ray DAG and return per-worker memory overhead in bytes.
+
+        experimental_compile() allocates NCCL channel buffers on worker GPUs
+        via TVM/DLPack (~19 GiB for TP=8, ~7 GiB for TP=4). We measure
+        CUDA free memory before/after to capture the exact overhead, then
+        subtract it from the KV cache budget so that lazy compilation during
+        first execute_model() doesn't OOM.
+        """
+
+        def _get_free_memory(worker):
+            import gc
+
+            import torch
+            gc.collect()
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            free, _ = torch.cuda.mem_get_info()
+            return free
+
+        free_before = self.collective_rpc(_get_free_memory)
+        self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
+        free_after = self.collective_rpc(_get_free_memory)
+
+        overheads = [max(0, b - a) for b, a in zip(free_before, free_after)]
+
+        max_overhead = max(overheads) if overheads else 0
+        logger.info(
+            "Compiled Ray DAG. NCCL channel buffer overhead per worker: "
+            "max=%.2f GiB, values=%s",
+            max_overhead / (1024**3),
+            [f"{o / (1024**3):.2f}" for o in overheads],
+        )
+
+        return overheads
 
     def execute_model(  # type: ignore[override]
         self,
@@ -476,10 +512,10 @@ class RayDistributedExecutor(Executor):
         grammar_output: "GrammarOutput | None",
         non_block: bool = False,
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
-        # Normally compiled eagerly in determine_available_memory() so that
-        # NCCL buffers are accounted for in the KV cache budget. Fall back
-        # to lazy compilation for attention-free models where
-        # determine_available_memory() is never called.
+        # Normally compiled eagerly in determine_available_memory() (after
+        # profiling) so that NCCL buffer overhead is subtracted from the KV
+        # cache budget. Fall back to lazy compilation for attention-free
+        # models where determine_available_memory() is never called.
         if self.forward_dag is None:
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
