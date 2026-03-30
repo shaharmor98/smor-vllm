@@ -40,6 +40,8 @@ DEFAULT_ENV_VAR_PREFIXES: set[str] = {
     "UCX_",
     "HF_",
     "HUGGING_FACE_",
+    "PYTORCH_",
+    "FLASHINFER_",
 }
 
 DEFAULT_EXTRA_ENV_VARS: set[str] = {
