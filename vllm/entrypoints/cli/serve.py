@@ -279,22 +279,38 @@ def run_multi_api_server(args: argparse.Namespace):
     with launch_core_engines(
         vllm_config, executor_class, log_stats, addresses, num_api_servers
     ) as (local_engine_manager, coordinator, addresses, tensor_queue):
-        # Construct common args for the APIServerProcessManager up-front.
-        stats_update_address = None
-        if coordinator:
-            stats_update_address = coordinator.get_stats_publish_address()
+        held_input_sockets, held_output_sockets = addresses.pop_held_ports()
 
-        # Start API servers.
-        api_server_manager = APIServerProcessManager(
+        # Construct common args for the APIServerProcessManager up-front.
+        api_server_manager_kwargs = dict(
             listen_address=listen_address,
             sock=sock,
             args=args,
             num_servers=num_api_servers,
             input_addresses=addresses.inputs,
             output_addresses=addresses.outputs,
-            stats_update_address=stats_update_address,
+            stats_update_address=coordinator.get_stats_publish_address()
+            if coordinator
+            else None,
             tensor_queue=tensor_queue,
+            held_input_sockets=held_input_sockets,
+            held_output_sockets=held_output_sockets,
         )
+
+        # For dp ranks > 0 in external/hybrid DP LB modes, we must delay the
+        # start of the API servers until the local engine is started
+        # (after the launcher context manager exits),
+        # since we get the front-end stats update address from the coordinator
+        # via the handshake with the local engine.
+        if dp_rank == 0 or not parallel_config.local_engines_only:
+            api_server_manager = APIServerProcessManager(**api_server_manager_kwargs)
+
+    # Start API servers now if they weren't already started.
+    if api_server_manager is None:
+        api_server_manager_kwargs["stats_update_address"] = (
+            addresses.frontend_stats_publish_address
+        )
+        api_server_manager = APIServerProcessManager(**api_server_manager_kwargs)
 
     # Wait for API servers.
     try:
