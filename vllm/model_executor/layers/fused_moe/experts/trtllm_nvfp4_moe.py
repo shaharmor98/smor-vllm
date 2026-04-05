@@ -41,6 +41,8 @@ class TrtLlmNvFp4ExpertsBase:
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
+        from vllm.config import get_current_vllm_config
+
         self.moe_config = moe_config
         self.quant_config = quant_config
 
@@ -52,6 +54,9 @@ class TrtLlmNvFp4ExpertsBase:
         self.hidden_dim = moe_config.hidden_dim
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
+        self.max_capture_size = (
+            get_current_vllm_config().compilation_config.max_cudagraph_capture_size
+        )
 
         assert self.quant_config.g1_alphas is not None
         assert self.quant_config.a2_gscale is not None
@@ -228,6 +233,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
             output=output,
+            tune_max_num_tokens=max(self.max_capture_size, 1),
         )
 
 
@@ -354,4 +360,5 @@ class TrtLlmNvFp4ExpertsMonolithic(
             routing_method_type=self.routing_method_type,
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
+            tune_max_num_tokens=max(self.max_capture_size, 1),
         )[0]
