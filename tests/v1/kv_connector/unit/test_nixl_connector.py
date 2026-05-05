@@ -1857,6 +1857,35 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         mock_dereg.assert_any_call("desc2")
 
 
+def test_nixl_side_channel_host_uses_ray_actor_ip_for_multinode_dp(monkeypatch):
+    vllm_config = create_vllm_config()
+    vllm_config.parallel_config.data_parallel_backend = "ray"
+    vllm_config.parallel_config.data_parallel_size = 8
+    vllm_config.parallel_config.data_parallel_size_local = 4
+
+    monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "driver-node")
+    monkeypatch.setattr(ray.util, "get_node_ip_address", lambda: "10.0.0.12")
+
+    assert (
+        NixlConnectorScheduler._resolve_side_channel_host(vllm_config)
+        == "10.0.0.12"
+    )
+
+
+def test_nixl_side_channel_host_keeps_env_for_non_ray_dp(monkeypatch):
+    vllm_config = create_vllm_config()
+    vllm_config.parallel_config.data_parallel_backend = "mp"
+    vllm_config.parallel_config.data_parallel_size = 8
+    vllm_config.parallel_config.data_parallel_size_local = 4
+
+    monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "rank-local-node")
+
+    assert (
+        NixlConnectorScheduler._resolve_side_channel_host(vllm_config)
+        == "rank-local-node"
+    )
+
+
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
     FakeNixlWrapper,
